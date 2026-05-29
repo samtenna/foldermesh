@@ -11,17 +11,17 @@ use ratatui::{
     widgets::{Block, Widget},
 };
 
-fn render(frame: &mut Frame) {
-    frame.render_widget("hello world!", frame.area());
-}
-
 pub struct App {
+    folder: String,
     exit: bool,
 }
 
 impl App {
-    pub fn default() -> Self {
-        App { exit: false }
+    pub fn new(folder: String) -> Self {
+        App {
+            folder,
+            exit: false,
+        }
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -61,7 +61,13 @@ impl App {
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let title = Line::from(" FileMesh ".bold());
-        let subtitle = Line::from(vec![" Quit ".into(), "<Q> ".blue().bold()]);
+        let subtitle = Line::from(vec![
+            " ".into(),
+            self.folder.as_str().blue().bold(),
+            " | ".into(),
+            "Help ".into(),
+            "<H> ".blue().bold(),
+        ]);
         let block = Block::bordered()
             .title(title.centered())
             .title_bottom(subtitle.centered())
