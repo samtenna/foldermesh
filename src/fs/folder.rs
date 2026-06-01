@@ -1,13 +1,16 @@
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-    sync::mpsc,
-};
+use std::{fmt, path::PathBuf, sync::mpsc};
 
 use notify::{Event, Watcher};
 
+use crate::fs::walk;
+
+const DATA_SUBDIR: &str = ".sync";
+const DB_FILENAME: &str = "sqlite.db";
+
 pub struct Folder {
-    path: PathBuf,
+    pub path: PathBuf,
+    pub data_dir_path: PathBuf,
+    pub db_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -39,8 +42,14 @@ impl fmt::Display for FolderError {
 
 impl Folder {
     pub fn new(path: &String) -> Result<Self, FolderError> {
+        let path = Folder::extract_path(path)?;
+        let data_dir_path = path.join(DATA_SUBDIR);
+        let db_path = data_dir_path.join(DB_FILENAME);
+
         Ok(Folder {
-            path: Folder::extract_path(path)?,
+            path,
+            data_dir_path,
+            db_path,
         })
     }
 
@@ -52,7 +61,7 @@ impl Folder {
 
         for res in rx {
             match res {
-                Ok(event) => println!("event: {:?}", event),
+                Ok(event) => self.handle_event(&event),
                 Err(e) => println!("watch error: {:?}", e),
             }
         }
@@ -60,17 +69,34 @@ impl Folder {
         Ok(())
     }
 
+    fn should_ignore_event(&self, event: &Event) -> bool {
+        event
+            .paths
+            .iter()
+            .any(|path| path.starts_with(&self.data_dir_path))
+    }
+
+    fn handle_event(&self, event: &Event) {
+        // Ignore events in the ".sync" directory
+        if self.should_ignore_event(event) {
+            return;
+        }
+
+        println!("event: {:?}", event);
+    }
+
     fn extract_path(path_string: &String) -> Result<PathBuf, FolderError> {
-        let mut path_buf = PathBuf::new();
-        path_buf = path_buf.join(path_string);
+        let path_buf = PathBuf::from(path_string);
         path_buf
             .canonicalize()
             .map_err(|source| FolderError::CanonicalizeFailed {
                 path: path_buf.clone(),
                 source,
-            })?;
+            })
+    }
 
-        Ok(path_buf)
+    fn get_folder_state(&self) {
+        let node = walk::Node::new(&self.path, Some(&self.data_dir_path));
     }
 }
 

@@ -1,10 +1,13 @@
+use std::io;
+
 use crate::fs::folder::FolderError;
 
 #[derive(Debug)]
 pub enum FolderMeshError {
     Folder(FolderError),
     Notify(notify::Error),
-    // Io(std::io::Error),
+    Db(rusqlite::Error),
+    Io(std::io::Error),
 }
 
 impl From<FolderError> for FolderMeshError {
@@ -16,5 +19,17 @@ impl From<FolderError> for FolderMeshError {
 impl From<notify::Error> for FolderMeshError {
     fn from(value: notify::Error) -> Self {
         FolderMeshError::Notify(value)
+    }
+}
+
+impl From<rusqlite::Error> for FolderMeshError {
+    fn from(value: rusqlite::Error) -> Self {
+        FolderMeshError::Db(value)
+    }
+}
+
+impl From<io::Error> for FolderMeshError {
+    fn from(value: io::Error) -> Self {
+        FolderMeshError::Io(value)
     }
 }
