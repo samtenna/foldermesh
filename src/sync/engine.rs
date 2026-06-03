@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -11,28 +12,49 @@ use crate::{
 };
 
 pub struct SyncEngine {
-    updates: VecDeque<Update>,
+    updates: VecDeque<notify::Event>,
     folder: Arc<Folder>,
     db: Db,
-}
-
-pub enum Update {
-    NotifyEvent(notify::Event),
+    pending_paths: HashMap<PathBuf, Instant>,
+    debounce: Duration,
 }
 
 impl SyncEngine {
-    pub fn new(folder: Arc<Folder>) -> Result<Self, rusqlite::Error> {
+    pub fn new(folder: Arc<Folder>, debounce_duration_ms: u64) -> Result<Self, rusqlite::Error> {
         Ok(SyncEngine {
             updates: VecDeque::from([]),
             db: Db::new(&folder.db_path)?,
             folder,
+            pending_paths: HashMap::new(),
+            debounce: Duration::from_millis(debounce_duration_ms),
         })
     }
 
-    pub fn run(&self) {
-        // check db consistency
+    pub fn run(&mut self) -> Result<(), FolderMeshError> {
+        self.check_db_consistency()?;
 
-        // start sync loop
+        loop {
+            if let Some(event) = self.updates.pop_back() {
+                for p in event.paths {
+                    self.pending_paths.insert(p, Instant::now());
+                }
+            }
+
+            // check pending paths
+            for (path, arrival_time) in self.pending_paths.clone() {
+                if arrival_time.elapsed() >= self.debounce {
+                    // debounce time has passed since last event on the path
+                    self.pending_paths.remove(&path);
+                    self.process_change(&path)?;
+                }
+            }
+        }
+    }
+
+    ///
+    fn process_change(&self, path: &PathBuf) -> Result<(), FolderMeshError> {
+        if let Some(file) = self.db.get_file_from_path(path) {}
+        Ok(())
     }
 
     /// Compares the file structure on disk and stored info in the sync sqlite.db file.
@@ -160,7 +182,7 @@ mod tests {
     fn test_engine(name: &str) -> io::Result<(PathBuf, SyncEngine)> {
         let root = test_root(name)?;
         let folder = Arc::new(Folder::new(&root.to_string_lossy().to_string()).unwrap());
-        let engine = SyncEngine::new(folder).unwrap();
+        let engine = SyncEngine::new(folder, 0).unwrap();
         Ok((root, engine))
     }
 

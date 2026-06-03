@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 
 pub struct Db {
     conn: Connection,
@@ -42,7 +42,7 @@ impl Db {
                 CREATE TABLE IF NOT EXISTS file (
                     id      INTEGER PRIMARY KEY,
                     name    TEXT NOT NULL,
-                    path    TEXT NOT NULL,
+                    path    TEXT NOT NULL UNIQUE,
                     hash    TEXT NOT NULL,
                     size    INTEGER NOT NULL
                 )
@@ -102,6 +102,25 @@ impl Db {
         })?;
 
         file_iter.collect()
+    }
+
+    pub fn get_file_from_path(&self, path: &PathBuf) -> rusqlite::Result<Option<File>> {
+        self.conn
+            .query_one(
+                "SELECT name, path, hash, size FROM file WHERE path = ?1",
+                (path.to_string_lossy().as_ref(),),
+                |row| {
+                    let size: i64 = row.get(3)?;
+
+                    Ok(File::new(
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        size as u64,
+                    ))
+                },
+            )
+            .optional()
     }
 }
 
@@ -255,6 +274,40 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files.contains(&updated));
         assert!(files.contains(&retained));
+
+        drop(db);
+        remove_db(&path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn get_file_from_path_returns_matching_file() -> Result<(), Box<dyn std::error::Error>> {
+        let path = test_db_path("get-file-from-path");
+        let db = Db::new(&path)?;
+        let first = File::new(
+            "a.txt".to_string(),
+            "a.txt".to_string(),
+            "hash-a".to_string(),
+            1,
+        );
+        let second = File::new(
+            "b.txt".to_string(),
+            "nested/b.txt".to_string(),
+            "hash-b".to_string(),
+            2,
+        );
+
+        db.create_file(first)?;
+        db.create_file(File::new(
+            second.name.clone(),
+            second.path.clone(),
+            second.hash.clone(),
+            second.size,
+        ))?;
+
+        let file = db.get_file_from_path(&PathBuf::from("nested/b.txt"))?;
+
+        assert_eq!(file, second);
 
         drop(db);
         remove_db(&path)?;

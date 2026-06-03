@@ -13,7 +13,7 @@ pub fn main() -> Result<(), FolderMeshError> {
     let args = Args::parse();
 
     let folder = Arc::new(Folder::new(&args.path)?);
-    let engine = SyncEngine::new(Arc::clone(&folder))?;
+    let mut engine = SyncEngine::new(Arc::clone(&folder), args.debounce_duration)?;
     let notify_folder = Arc::clone(&folder);
 
     let notify_thread = thread::spawn(move || notify_folder.watch_sync_directory());
@@ -40,4 +40,5 @@ pub fn main() -> Result<(), FolderMeshError> {
 #[command(version, about, long_about=None)]
 struct Args {
     path: String,
+    debounce_duration: u64,
 }
