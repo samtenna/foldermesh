@@ -64,9 +64,11 @@ impl Db {
         Ok(())
     }
 
-    pub fn delete_file(&self, file: File) -> rusqlite::Result<()> {
-        self.conn
-            .execute("DELETE FROM file WHERE path = ?1", (file.path,))?;
+    pub fn delete_file(&self, path: &PathBuf) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM file WHERE path = ?1",
+            (path.to_string_lossy().as_ref(),),
+        )?;
 
         Ok(())
     }
@@ -220,7 +222,7 @@ mod tests {
             retained.size,
         ))?;
 
-        db.delete_file(deleted)?;
+        db.delete_file(&PathBuf::from(deleted.path.clone()))?;
 
         let files = db.get_files()?;
 

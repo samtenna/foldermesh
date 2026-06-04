@@ -1,7 +1,7 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, mpsc::Receiver},
     time::{Duration, Instant},
 };
 
@@ -15,7 +15,7 @@ use crate::{
 };
 
 pub struct SyncEngine {
-    updates: VecDeque<notify::Event>,
+    updates: Receiver<notify::Event>,
     folder: Arc<Folder>,
     db: Db,
     pending_paths: HashMap<PathBuf, Instant>,
@@ -23,9 +23,13 @@ pub struct SyncEngine {
 }
 
 impl SyncEngine {
-    pub fn new(folder: Arc<Folder>, debounce_duration_ms: u64) -> Result<Self, rusqlite::Error> {
+    pub fn new(
+        folder: Arc<Folder>,
+        debounce_duration_ms: u64,
+        updates: Receiver<notify::Event>,
+    ) -> Result<Self, rusqlite::Error> {
         Ok(SyncEngine {
-            updates: VecDeque::from([]),
+            updates,
             db: Db::new(&folder.db_path)?,
             folder,
             pending_paths: HashMap::new(),
@@ -37,7 +41,7 @@ impl SyncEngine {
         self.check_db_consistency()?;
 
         loop {
-            if let Some(event) = self.updates.pop_back() {
+            if let Ok(event) = self.updates.try_recv() {
                 for p in event.paths {
                     self.pending_paths.insert(p, Instant::now());
                 }
@@ -47,10 +51,17 @@ impl SyncEngine {
             for (path, arrival_time) in self.pending_paths.clone() {
                 if arrival_time.elapsed() >= self.debounce {
                     // debounce time has passed since last event on the path
+                    println!(
+                        "processing event for path: {}",
+                        path.to_string_lossy().to_string(),
+                    );
                     self.pending_paths.remove(&path);
                     self.process_change(&path)?;
                 }
             }
+
+            // TODO: sleeping quick fix, feels icky change to blocking at some point
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -68,12 +79,16 @@ impl SyncEngine {
 
         if let Some(db_file) = self.db.get_file_from_path(path)? {
             // Already exists in the db, want to compare to the file system
-            self.db.update_file(File::new(
-                name,
-                db_file.path,
-                hash_at_path(path)?.to_string(),
-                path.metadata()?.len(),
-            ))?;
+            if path.exists() {
+                self.db.update_file(File::new(
+                    name,
+                    db_file.path,
+                    hash_at_path(path)?.to_string(),
+                    path.metadata()?.len(),
+                ))?;
+            } else {
+                self.db.delete_file(path)?;
+            }
         } else {
             // Add the new db item accordingly
             self.db.create_file(File::new(
@@ -143,12 +158,7 @@ impl SyncEngine {
                 }
             } else {
                 // item missing on disk
-                self.db.delete_file(File::new(
-                    item.name().to_string(),
-                    item.relative_path().to_string_lossy().into_owned(),
-                    item.hash().to_string(),
-                    item.size(),
-                ))?;
+                self.db.delete_file(item.relative_path())?;
             }
         }
 
@@ -195,6 +205,7 @@ mod tests {
     use super::*;
     use std::{
         fs, io,
+        sync::mpsc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -212,7 +223,8 @@ mod tests {
     fn test_engine(name: &str) -> io::Result<(PathBuf, SyncEngine)> {
         let root = test_root(name)?;
         let folder = Arc::new(Folder::new(&root.to_string_lossy().to_string()).unwrap());
-        let engine = SyncEngine::new(folder, 0).unwrap();
+        let (_tx, rx) = mpsc::channel();
+        let engine = SyncEngine::new(folder, 0, rx).unwrap();
         Ok((root, engine))
     }
 
