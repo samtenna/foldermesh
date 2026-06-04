@@ -31,7 +31,7 @@ pub enum Node {
     File(File),
 }
 
-fn hash_at_path(path: &PathBuf) -> io::Result<blake3::Hash> {
+pub fn hash_at_path(path: &PathBuf) -> io::Result<blake3::Hash> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Hasher::new();
     let mut buf = [0u8; 8 * 1024]; // 8kb chunks ?change?

@@ -305,7 +305,9 @@ mod tests {
             second.size,
         ))?;
 
-        let file = db.get_file_from_path(&PathBuf::from("nested/b.txt"))?;
+        let file = db
+            .get_file_from_path(&PathBuf::from("nested/b.txt"))?
+            .unwrap();
 
         assert_eq!(file, second);
 

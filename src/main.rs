@@ -40,5 +40,6 @@ pub fn main() -> Result<(), FolderMeshError> {
 #[command(version, about, long_about=None)]
 struct Args {
     path: String,
+    #[arg(default_value_t = 250)]
     debounce_duration: u64,
 }

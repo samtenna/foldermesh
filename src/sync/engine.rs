@@ -8,7 +8,10 @@ use std::{
 use crate::{
     db::{Db, File},
     error::FolderMeshError,
-    fs::{folder::Folder, walk},
+    fs::{
+        folder::Folder,
+        walk::{self, hash_at_path},
+    },
 };
 
 pub struct SyncEngine {
@@ -51,9 +54,36 @@ impl SyncEngine {
         }
     }
 
-    ///
+    /// Check the path's current status in the DB and disk and sync them accordingly.
     fn process_change(&self, path: &PathBuf) -> Result<(), FolderMeshError> {
-        if let Some(file) = self.db.get_file_from_path(path) {}
+        let name = path
+            .file_name()
+            .ok_or_else(|| FolderMeshError::Other("path has no file name".into()))?
+            .to_string_lossy()
+            .into_owned();
+
+        if path.is_dir() {
+            return Ok(());
+        }
+
+        if let Some(db_file) = self.db.get_file_from_path(path)? {
+            // Already exists in the db, want to compare to the file system
+            self.db.update_file(File::new(
+                name,
+                db_file.path,
+                hash_at_path(path)?.to_string(),
+                path.metadata()?.len(),
+            ))?;
+        } else {
+            // Add the new db item accordingly
+            self.db.create_file(File::new(
+                name,
+                path.to_string_lossy().into_owned(),
+                hash_at_path(path)?.to_string(),
+                path.metadata()?.len(),
+            ))?;
+        }
+
         Ok(())
     }
 
@@ -184,6 +214,70 @@ mod tests {
         let folder = Arc::new(Folder::new(&root.to_string_lossy().to_string()).unwrap());
         let engine = SyncEngine::new(folder, 0).unwrap();
         Ok((root, engine))
+    }
+
+    #[test]
+    fn process_change_creates_missing_file_in_db() -> io::Result<()> {
+        let (root, engine) = test_engine("process-creates")?;
+        let file_path = engine.folder.path.join("created.txt");
+        fs::write(&file_path, "created contents")?;
+
+        engine.process_change(&file_path).unwrap();
+
+        let file = engine.db.get_file_from_path(&file_path).unwrap().unwrap();
+
+        assert_eq!(file.name, "created.txt");
+        assert_eq!(file.path, file_path.to_string_lossy());
+        assert_eq!(file.size, 16);
+        assert_eq!(file.hash, blake3::hash(b"created contents").to_string());
+
+        drop(engine);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn process_change_updates_existing_file_in_db() -> io::Result<()> {
+        let (root, engine) = test_engine("process-updates")?;
+        let file_path = engine.folder.path.join("updated.txt");
+        fs::write(&file_path, "updated contents")?;
+        engine
+            .db
+            .create_file(File::new(
+                "old-name.txt".to_string(),
+                file_path.to_string_lossy().into_owned(),
+                "old-hash".to_string(),
+                1,
+            ))
+            .unwrap();
+
+        engine.process_change(&file_path).unwrap();
+
+        let file = engine.db.get_file_from_path(&file_path).unwrap().unwrap();
+
+        assert_eq!(file.name, "updated.txt");
+        assert_eq!(file.path, file_path.to_string_lossy());
+        assert_eq!(file.size, 16);
+        assert_eq!(file.hash, blake3::hash(b"updated contents").to_string());
+
+        drop(engine);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn process_change_ignores_directories() -> io::Result<()> {
+        let (root, engine) = test_engine("process-ignores-dirs")?;
+        let dir_path = engine.folder.path.join("nested");
+        fs::create_dir(&dir_path)?;
+
+        engine.process_change(&dir_path).unwrap();
+
+        assert!(engine.db.get_file_from_path(&dir_path).unwrap().is_none());
+
+        drop(engine);
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

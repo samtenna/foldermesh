@@ -8,6 +8,7 @@ pub enum FolderMeshError {
     Notify(notify::Error),
     Db(rusqlite::Error),
     Io(std::io::Error),
+    Other(String),
 }
 
 impl From<FolderError> for FolderMeshError {
