@@ -67,39 +67,67 @@ impl SyncEngine {
 
     /// Check the path's current status in the DB and disk and sync them accordingly.
     fn process_change(&self, path: &PathBuf) -> Result<(), FolderMeshError> {
+        let db_path = self.relative_path(path)?;
+
+        if self.is_internal_path(path) {
+            self.db.delete_file(&db_path)?;
+            return Ok(());
+        }
+
+        if db_path.as_os_str().is_empty() {
+            self.db.delete_file(&db_path)?;
+            return Ok(());
+        }
+
+        if let Some(db_file) = self.db.get_file_from_path(&db_path)? {
+            if path.exists() {
+                let mut file = self.file_from_path(path)?;
+                file.path = db_file.path;
+                self.db.update_file(file)?;
+            } else {
+                self.db.delete_file(&db_path)?;
+            }
+        } else if path.exists() {
+            self.db.create_file(self.file_from_path(path)?)?;
+        }
+
+        Ok(())
+    }
+
+    fn is_internal_path(&self, path: &PathBuf) -> bool {
+        path.starts_with(&self.folder.data_dir_path)
+    }
+
+    fn relative_path(&self, path: &PathBuf) -> Result<PathBuf, FolderMeshError> {
+        path.strip_prefix(&self.folder.path)
+            .map(|path| path.to_path_buf())
+            .map_err(|_| {
+                FolderMeshError::Other(format!(
+                    "path is outside sync folder: {}",
+                    path.to_string_lossy()
+                ))
+            })
+    }
+
+    fn file_from_path(&self, path: &PathBuf) -> Result<File, FolderMeshError> {
         let name = path
             .file_name()
             .ok_or_else(|| FolderMeshError::Other("path has no file name".into()))?
             .to_string_lossy()
             .into_owned();
-
-        if path.is_dir() {
-            return Ok(());
-        }
-
-        if let Some(db_file) = self.db.get_file_from_path(path)? {
-            // Already exists in the db, want to compare to the file system
-            if path.exists() {
-                self.db.update_file(File::new(
-                    name,
-                    db_file.path,
-                    hash_at_path(path)?.to_string(),
-                    path.metadata()?.len(),
-                ))?;
-            } else {
-                self.db.delete_file(path)?;
-            }
+        let metadata = path.metadata()?;
+        let hash = if metadata.is_dir() {
+            String::new()
         } else {
-            // Add the new db item accordingly
-            self.db.create_file(File::new(
-                name,
-                path.to_string_lossy().into_owned(),
-                hash_at_path(path)?.to_string(),
-                path.metadata()?.len(),
-            ))?;
-        }
+            hash_at_path(path)?.to_string()
+        };
 
-        Ok(())
+        Ok(File::new(
+            name,
+            self.relative_path(path)?.to_string_lossy().into_owned(),
+            hash,
+            metadata.len(),
+        ))
     }
 
     /// Compares the file structure on disk and stored info in the sync sqlite.db file.
@@ -110,7 +138,22 @@ impl SyncEngine {
         let disk_items = disk_tree.flatten();
         let disk_by_path: HashMap<PathBuf, Item> = disk_items
             .into_iter()
-            .map(|item| (item.relative_path().clone(), item))
+            .filter_map(|item| {
+                let relative_path = self.relative_path(item.relative_path()).ok()?;
+
+                if relative_path.as_os_str().is_empty() {
+                    return None;
+                }
+
+                let item = Item::new(
+                    relative_path.clone(),
+                    item.name().to_string(),
+                    item.size(),
+                    item.hash().to_string(),
+                );
+
+                Some((relative_path, item))
+            })
             .collect();
 
         let db_items: Vec<Item> = self
@@ -130,8 +173,8 @@ impl SyncEngine {
             .collect();
 
         // compare db and disk contents
-        // missing file in db: add to db
-        // missing file on disk: remove from db (add to changelog?)
+        // missing item in db: add to db
+        // missing item on disk: remove from db (add to changelog?)
         // TODO: changelog
         for (path, item) in &disk_by_path {
             if !db_by_path.contains_key(path) {
@@ -232,14 +275,15 @@ mod tests {
     fn process_change_creates_missing_file_in_db() -> io::Result<()> {
         let (root, engine) = test_engine("process-creates")?;
         let file_path = engine.folder.path.join("created.txt");
+        let db_path = PathBuf::from("created.txt");
         fs::write(&file_path, "created contents")?;
 
         engine.process_change(&file_path).unwrap();
 
-        let file = engine.db.get_file_from_path(&file_path).unwrap().unwrap();
+        let file = engine.db.get_file_from_path(&db_path).unwrap().unwrap();
 
         assert_eq!(file.name, "created.txt");
-        assert_eq!(file.path, file_path.to_string_lossy());
+        assert_eq!(file.path, "created.txt");
         assert_eq!(file.size, 16);
         assert_eq!(file.hash, blake3::hash(b"created contents").to_string());
 
@@ -252,12 +296,13 @@ mod tests {
     fn process_change_updates_existing_file_in_db() -> io::Result<()> {
         let (root, engine) = test_engine("process-updates")?;
         let file_path = engine.folder.path.join("updated.txt");
+        let db_path = PathBuf::from("updated.txt");
         fs::write(&file_path, "updated contents")?;
         engine
             .db
             .create_file(File::new(
                 "old-name.txt".to_string(),
-                file_path.to_string_lossy().into_owned(),
+                db_path.to_string_lossy().into_owned(),
                 "old-hash".to_string(),
                 1,
             ))
@@ -265,10 +310,10 @@ mod tests {
 
         engine.process_change(&file_path).unwrap();
 
-        let file = engine.db.get_file_from_path(&file_path).unwrap().unwrap();
+        let file = engine.db.get_file_from_path(&db_path).unwrap().unwrap();
 
         assert_eq!(file.name, "updated.txt");
-        assert_eq!(file.path, file_path.to_string_lossy());
+        assert_eq!(file.path, "updated.txt");
         assert_eq!(file.size, 16);
         assert_eq!(file.hash, blake3::hash(b"updated contents").to_string());
 
@@ -278,14 +323,53 @@ mod tests {
     }
 
     #[test]
-    fn process_change_ignores_directories() -> io::Result<()> {
-        let (root, engine) = test_engine("process-ignores-dirs")?;
+    fn process_change_creates_missing_directory_in_db() -> io::Result<()> {
+        let (root, engine) = test_engine("process-creates-dir")?;
         let dir_path = engine.folder.path.join("nested");
+        let db_path = PathBuf::from("nested");
         fs::create_dir(&dir_path)?;
 
         engine.process_change(&dir_path).unwrap();
 
-        assert!(engine.db.get_file_from_path(&dir_path).unwrap().is_none());
+        let file = engine.db.get_file_from_path(&db_path).unwrap().unwrap();
+
+        assert_eq!(file.name, "nested");
+        assert_eq!(file.path, "nested");
+        assert_eq!(file.size, dir_path.metadata()?.len());
+        assert!(file.hash.is_empty());
+
+        drop(engine);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn process_change_ignores_sync_directory_paths() -> io::Result<()> {
+        let (root, engine) = test_engine("process-ignores-sync-dir")?;
+        let sync_file_path = engine.folder.data_dir_path.join("internal.tmp");
+        fs::write(&sync_file_path, "internal")?;
+
+        engine.process_change(&engine.folder.data_dir_path).unwrap();
+        engine.process_change(&sync_file_path).unwrap();
+        engine.process_change(&engine.folder.db_path).unwrap();
+
+        let files = engine.db.get_files().unwrap();
+
+        assert!(
+            !files
+                .iter()
+                .any(|file| file.path == PathBuf::from(".sync").to_string_lossy())
+        );
+        assert!(
+            !files
+                .iter()
+                .any(|file| file.path == PathBuf::from(".sync/internal.tmp").to_string_lossy())
+        );
+        assert!(
+            !files
+                .iter()
+                .any(|file| file.path == PathBuf::from(".sync/sqlite.db").to_string_lossy())
+        );
 
         drop(engine);
         fs::remove_dir_all(root)?;
@@ -303,7 +387,7 @@ mod tests {
         let files = engine.db.get_files().unwrap();
 
         assert!(files.iter().any(|file| {
-            file.path == file_path.to_string_lossy()
+            file.path == "hello.txt"
                 && file.name == "hello.txt"
                 && file.size == 5
                 && file.hash == blake3::hash(b"hello").to_string()
@@ -318,7 +402,7 @@ mod tests {
     #[test]
     fn check_db_consistency_deletes_items_missing_from_disk() -> io::Result<()> {
         let (root, engine) = test_engine("deletes-missing")?;
-        let stale_path = engine.folder.path.join("stale.txt");
+        let stale_path = PathBuf::from("stale.txt");
         engine
             .db
             .create_file(File::new(
@@ -348,12 +432,13 @@ mod tests {
     fn check_db_consistency_updates_changed_disk_items() -> io::Result<()> {
         let (root, engine) = test_engine("updates-changed")?;
         let file_path = engine.folder.path.join("changed.txt");
+        let db_path = PathBuf::from("changed.txt");
         fs::write(&file_path, "new contents")?;
         engine
             .db
             .create_file(File::new(
                 "changed.txt".to_string(),
-                file_path.to_string_lossy().into_owned(),
+                db_path.to_string_lossy().into_owned(),
                 "old-hash".to_string(),
                 1,
             ))
@@ -364,7 +449,7 @@ mod tests {
         let files = engine.db.get_files().unwrap();
         let updated = files
             .iter()
-            .find(|file| file.path == file_path.to_string_lossy())
+            .find(|file| file.path == "changed.txt")
             .expect("expected changed file to remain in db");
 
         assert_eq!(updated.name, "changed.txt");
