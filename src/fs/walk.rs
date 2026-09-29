@@ -10,19 +10,19 @@ use crate::sync::engine::Item;
 
 #[derive(Debug)]
 pub struct Directory {
-    path: PathBuf,
-    name: String,
-    size: u64,
-    hash: String,
-    children: Vec<Node>,
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub hash: String,
+    pub children: Vec<Node>,
 }
 
 #[derive(Debug)]
 pub struct File {
-    path: PathBuf,
-    name: String,
-    size: u64,
-    hash: String,
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub hash: String,
 }
 
 #[derive(Debug)]
@@ -338,5 +338,158 @@ mod tests {
         let err = Node::new(&path, None).expect_err("missing path should error");
 
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn hash_at_path_hashes_empty_file() -> io::Result<()> {
+        let root = test_root("hash-empty")?;
+        let file_path = root.join("empty.txt");
+        fs::write(&file_path, b"")?;
+
+        let hash = hash_at_path(&file_path)?;
+        assert_eq!(hash.to_string(), blake3::hash(b"").to_string());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn hash_at_path_hashes_large_file_across_chunk_boundary() -> io::Result<()> {
+        let root = test_root("hash-large")?;
+        let file_path = root.join("large.bin");
+        // 25,000 bytes crosses the 8KB buffer boundary multiple times
+        let data: Vec<u8> = (0..25_000).map(|i| (i % 256) as u8).collect();
+        fs::write(&file_path, &data)?;
+
+        let hash = hash_at_path(&file_path)?;
+        assert_eq!(hash.to_string(), blake3::hash(&data).to_string());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn hash_at_path_errors_on_directory_and_missing_file() -> io::Result<()> {
+        let root = test_root("hash-err")?;
+        let missing = root.join("missing.txt");
+        assert!(hash_at_path(&missing).is_err());
+        assert!(hash_at_path(&root).is_err());
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn creates_empty_directory_node() -> io::Result<()> {
+        let root = test_root("empty-dir")?;
+        let node = Node::new(&root, None)?;
+
+        match &node {
+            Node::Directory(dir) => {
+                assert_eq!(dir.path, root);
+                assert!(dir.children.is_empty());
+            }
+            Node::File(_) => panic!("expected directory node"),
+        }
+
+        let items = node.flatten();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].relative_path(), &root);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn walks_deeply_nested_directories() -> io::Result<()> {
+        let root = test_root("deep-nested")?;
+        let mut current = root.clone();
+        for i in 0..20 {
+            current = current.join(format!("level_{i}"));
+        }
+        fs::create_dir_all(&current)?;
+        let leaf_file = current.join("leaf.txt");
+        fs::write(&leaf_file, "deep content")?;
+
+        let node = Node::new(&root, None)?;
+        let items = node.flatten();
+
+        // 1 root dir + 20 nested dirs + 1 file = 22 items
+        assert_eq!(items.len(), 22);
+        assert!(items.iter().any(|item| item.relative_path() == &leaf_file));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_nested_sync_or_target_dir() -> io::Result<()> {
+        let root = test_root("nested-ignore")?;
+        let sub = root.join("sub");
+        let ignored_dir = sub.join(".sync");
+        let kept_dir = sub.join("kept");
+        fs::create_dir_all(&ignored_dir)?;
+        fs::create_dir_all(&kept_dir)?;
+
+        fs::write(ignored_dir.join("ignore.txt"), "skip")?;
+        fs::write(kept_dir.join("keep.txt"), "keep")?;
+
+        let node = Node::new(&root, Some(&ignored_dir))?;
+        let items = node.flatten();
+
+        assert!(items.iter().any(|item| item.name() == "keep.txt"));
+        assert!(!items.iter().any(|item| item.name() == "ignore.txt"));
+        assert!(!items.iter().any(|item| item.name() == ".sync"));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn creates_node_with_special_characters_in_filename() -> io::Result<()> {
+        let root = test_root("special-chars")?;
+        let special_name = "test 文件 space & 🚀.txt";
+        let file_path = root.join(special_name);
+        fs::write(&file_path, "special content")?;
+
+        let node = Node::new(&file_path, None)?;
+        match node {
+            Node::File(file) => {
+                assert_eq!(file.name, special_name);
+                assert_eq!(file.size, 15);
+                assert_eq!(file.hash, blake3::hash(b"special content").to_string());
+            }
+            Node::Directory(_) => panic!("expected file node"),
+        }
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn symlink_handling() -> io::Result<()> {
+        let root = test_root("symlink")?;
+        let target_file = root.join("target.txt");
+        let symlink_path = root.join("link.txt");
+        fs::write(&target_file, "target data")?;
+
+        #[cfg(windows)]
+        let link_res = std::os::windows::fs::symlink_file(&target_file, &symlink_path);
+        #[cfg(unix)]
+        let link_res = std::os::unix::fs::symlink(&target_file, &symlink_path);
+
+        if link_res.is_ok() {
+            let node = Node::new(&symlink_path, None)?;
+            match node {
+                Node::File(file) => {
+                    assert_eq!(file.size, 11);
+                    assert_eq!(file.hash, blake3::hash(b"target data").to_string());
+                }
+                Node::Directory(_) => panic!("expected file node for file symlink"),
+            }
+        }
+
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
