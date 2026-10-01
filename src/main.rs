@@ -9,6 +9,7 @@ use clap::Parser;
 pub mod db;
 pub mod error;
 pub mod fs;
+pub mod network;
 pub mod sync;
 pub mod tui;
 

@@ -8,6 +8,7 @@ pub enum FolderMeshError {
     Notify(notify::Error),
     Db(rusqlite::Error),
     Io(std::io::Error),
+    Network(String),
     Other(String),
 }
 
@@ -26,6 +27,12 @@ impl From<notify::Error> for FolderMeshError {
 impl From<rusqlite::Error> for FolderMeshError {
     fn from(value: rusqlite::Error) -> Self {
         FolderMeshError::Db(value)
+    }
+}
+
+impl From<libp2p_noise::Error> for FolderMeshError {
+    fn from(value: libp2p_noise::Error) -> Self {
+        FolderMeshError::Network(value.to_string())
     }
 }
 
