@@ -4,15 +4,19 @@ use libp2p::{
         Stream,
         channel::{mpsc, oneshot},
     },
-    identity, noise, ping,
-    swarm::dummy::Behaviour,
+    identity, mdns, noise, ping, request_response,
+    swarm::NetworkBehaviour,
     tcp, yamux,
 };
+use serde::{Deserialize, Serialize};
 use std::error::Error;
+use tokio;
+
+use crate::sync::engine::Item;
 
 pub fn new(
     secret_key_seed: Option<u8>,
-) -> Result<(Client, impl Stream<Item = Event>), Box<dyn Error>> {
+) -> Result<(Client, impl Stream<Item = Event>, EventLoop), Box<dyn Error>> {
     let id_keys = match secret_key_seed {
         Some(seed) => {
             let mut bytes = [0u8; 32];
@@ -36,7 +40,7 @@ pub fn new(
 
     //swarm.behaviour_mut()
 
-    let (command_sender, command_receiver) = mpsc::channel(0);
+    let (command_sender, command_receiver) = mpsc::channel::<Command>(0);
     let (event_sender, event_receiver) = mpsc::channel(0);
 
     Ok((
@@ -48,22 +52,41 @@ pub fn new(
     ))
 }
 
+// Transfer types to be sent over wire
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StateRequest {
+    RequestFullState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StateResponse {
+    // flattened tree state
+    FullState(Vec<Item>),
+}
+
+#[derive(NetworkBehaviour)]
+pub struct FoldermeshBehaviour {
+    pub ping: ping::Behaviour,
+    pub mdns: mdns::tokio::Behaviour,
+    pub request_response: request_response::cbor::Behaviour<StateRequest, StateRequest>,
+}
+
 #[derive(Clone)]
 pub struct Client {
-    sender: mpsc::Sender<()>,
+    sender: mpsc::Sender<Command>,
 }
 
 pub enum Event {}
 
 pub struct EventLoop {
-    swarm: Swarm<Behaviour>,
+    swarm: Swarm<FoldermeshBehaviour>,
     command_receiver: mpsc::Receiver<Command>,
     event_sender: mpsc::Sender<Event>,
 }
 
 impl EventLoop {
     fn new(
-        swarm: Swarm<Behaviour>,
+        swarm: Swarm<FoldermeshBehaviour>,
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<Event>,
     ) -> Self {
@@ -71,6 +94,20 @@ impl EventLoop {
             swarm,
             command_receiver,
             event_sender,
+        }
+    }
+
+    async fn run(mut self) {
+        loop {
+            tokio::select! {
+                event = self.swarm.select_next_some() => match event {
+                    _ -> {}
+                },
+
+                Some(command) = self.command_receiver.next() => match command {
+                    _ => {}
+                }
+            }
         }
     }
 }

@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     db::{Db, File},
     error::FolderMeshError,
@@ -209,6 +211,7 @@ impl SyncEngine {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Item {
     relative_path: PathBuf,
     name: String,
